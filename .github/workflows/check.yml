@@ -1,0 +1,156 @@
+name: Check
+
+# Shared repository check: detect relevant changes, install the tools locked in
+# mise.toml, and run one mise task. Callers add a `Validate` gate job that needs
+# this job and any repository-specific jobs; rulesets require only that gate.
+
+on:
+  workflow_call:
+    inputs:
+      paths:
+        description: >-
+          dorny/paths-filter patterns, one per line, that make the check
+          relevant. Empty runs the check on every event.
+        type: string
+        default: ""
+      force:
+        description: Run the check regardless of changed paths
+        type: boolean
+        default: false
+      task:
+        description: mise task that runs the repository checks
+        type: string
+        default: check
+      setup-task:
+        description: mise task to run before the checks, e.g. to install locked dependencies
+        type: string
+        default: ""
+      install-args:
+        description: Tools to install when not every tool in mise.toml is needed
+        type: string
+        default: ""
+      cache-path:
+        description: Dependency cache directories, one per line; empty disables the cache
+        type: string
+        default: ""
+      cache-key-files:
+        description: Glob patterns, one per line, whose contents key the dependency cache
+        type: string
+        default: ""
+      timeout-minutes:
+        description: Job timeout
+        type: number
+        default: 25
+    outputs:
+      relevant:
+        description: Whether the checks ran
+        value: ${{ jobs.check.outputs.relevant }}
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Check
+    runs-on: ubuntu-26.04
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      relevant: ${{ steps.relevant.outputs.relevant }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Push comparisons need the previous commit without an authenticated fetch.
+          # A number 0 is falsy in expressions, so compare as strings.
+          fetch-depth: ${{ inputs.paths != '' && '0' || '1' }}
+          persist-credentials: false
+
+      # A force push discards the previous head, so there is nothing to compare
+      # against: run every check instead, as for manual and scheduled runs.
+      - name: Build path filter
+        id: filter
+        if: >-
+          inputs.paths != '' &&
+          !inputs.force &&
+          !github.event.forced &&
+          (github.event_name == 'pull_request' || github.event_name == 'push')
+        env:
+          PATTERNS: ${{ inputs.paths }}
+        run: |
+          {
+            echo 'yaml<<EOF_FILTER'
+            echo 'relevant:'
+            while IFS= read -r pattern; do
+              pattern="${pattern#"${pattern%%[![:space:]]*}"}"
+              pattern="${pattern%"${pattern##*[![:space:]]}"}"
+              [[ -z "$pattern" || "$pattern" == \#* ]] && continue
+              printf "  - '%s'\n" "${pattern//\'/\'\'}"
+            done <<< "$PATTERNS"
+            echo 'EOF_FILTER'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Detect relevant changes
+        id: changes
+        if: steps.filter.outcome == 'success'
+        uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        with:
+          base: ${{ github.ref }}
+          predicate-quantifier: some-with-excludes
+          filters: ${{ steps.filter.outputs.yaml }}
+
+      - name: Decide whether to run
+        id: relevant
+        env:
+          RELEVANT: ${{ steps.changes.outcome == 'skipped' || steps.changes.outputs.relevant == 'true' }}
+        run: |
+          echo "relevant=$RELEVANT" >> "$GITHUB_OUTPUT"
+          if [[ "$RELEVANT" != true ]]; then
+            echo "::notice::No relevant changes; skipping checks"
+          fi
+
+      - name: Set up locked tools
+        if: steps.relevant.outputs.relevant == 'true'
+        uses: jdx/mise-action@9b200bcecbfd6303e69a4a261b2e09e3757440a7 # v5.2.0
+        with:
+          version: 2026.10.14
+          install_args: ${{ inputs.install-args }}
+          cache_save: ${{ github.event_name != 'pull_request' }}
+
+      - name: Restore dependency cache
+        id: cache
+        if: steps.relevant.outputs.relevant == 'true' && inputs.cache-path != ''
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ inputs.cache-path }}
+          key: deps-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(inputs.cache-key-files) }}
+          restore-keys: deps-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Run setup task
+        if: steps.relevant.outputs.relevant == 'true' && inputs.setup-task != ''
+        env:
+          TASK: ${{ inputs.setup-task }}
+        run: mise run "$TASK"
+
+      - name: Run checks
+        if: steps.relevant.outputs.relevant == 'true'
+        env:
+          TASK: ${{ inputs.task }}
+          # Authenticated GitHub requests avoid the anonymous rate limit.
+          GITHUB_TOKEN: ${{ github.token }}
+        run: mise run "$TASK"
+
+      # Only main writes the cache, so pull requests cannot poison it.
+      - name: Save dependency cache
+        if: >-
+          steps.relevant.outputs.relevant == 'true' &&
+          inputs.cache-path != '' &&
+          github.event_name == 'push' &&
+          github.ref == 'refs/heads/main' &&
+          steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ inputs.cache-path }}
+          key: ${{ steps.cache.outputs.cache-primary-key }}

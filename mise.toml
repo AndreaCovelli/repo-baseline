@@ -1,0 +1,30 @@
+[settings]
+lockfile = true
+
+[tools]
+"github:kjanat/actionlint" = "1.17.0"
+shellcheck = "0.11.0"
+
+[tasks."check:actions"]
+description = "Lint GitHub Actions workflows"
+run = "actionlint"
+
+[tasks."check:shell"]
+description = "Lint the baseline script"
+run = "shellcheck bin/baseline"
+
+[tasks."check:json"]
+description = "Check that the baseline specs are valid JSON"
+run = "jq empty baseline/*.json baseline/rulesets/*.json renovate.json"
+
+[tasks.check]
+description = "Run all repository checks"
+run = [
+  { task = "check:actions" },
+  { task = "check:shell" },
+  { task = "check:json" },
+]
+
+[tasks.drift]
+description = "Report how each repository differs from the baseline (needs gh auth)"
+run = "bin/baseline check"

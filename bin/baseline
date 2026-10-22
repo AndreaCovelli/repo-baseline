@@ -1,0 +1,254 @@
+#!/usr/bin/env bash
+# Compare repositories with the baseline in baseline/, or apply it.
+#
+#   baseline check [repo...]                       report drift (default: every managed repo)
+#   baseline apply [--only PARTS] (--all | repo...)  apply the baseline
+#
+# Managed repositories are the owner's non-archived, non-fork repositories
+# whose renovate.json extends the owner's renovate-config preset. They are
+# discovered at run time, so no list of (private) repository names is kept here.
+#
+# PARTS is a comma-separated subset of settings,security,rulesets. Apply
+# rulesets only once the repository's default branch reports the required
+# `Validate` check, or pull requests cannot merge.
+set -euo pipefail
+shopt -s inherit_errexit
+
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+spec="$root/baseline"
+owner="${BASELINE_OWNER:-$(gh api user --jq .login)}"
+preset="github>$owner/renovate-config"
+all_parts="settings,security,rulesets"
+
+die() { printf 'baseline: %s\n' "$*" >&2; exit 2; }
+
+usage() {
+  sed -n '2,13s/^# \{0,1\}//p' "${BASH_SOURCE[0]}"
+  exit "${1:-2}"
+}
+
+# Whether a repository's renovate.json extends the preset.
+is_managed() {
+  local file
+  for file in renovate.json .github/renovate.json; do
+    if gh api -H "Accept: application/vnd.github.raw" "repos/$owner/$1/contents/$file" 2>/dev/null |
+      jq -e --arg p "$preset" '(.extends // []) | any(. == $p or startswith($p + "#") or startswith($p + ":"))' >/dev/null 2>&1; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+managed_repos() {
+  local repo
+  while IFS= read -r repo; do
+    if is_managed "$repo"; then echo "$repo"; fi
+  done < <(gh repo list "$owner" --limit 1000 --no-archived --source --json name --jq '.[].name' | sort -f)
+}
+
+require_managed() {
+  local repo
+  for repo in "$@"; do
+    is_managed "$repo" || die "$owner/$repo does not extend $preset"
+  done
+}
+
+wanted_rulesets() {
+  echo "$spec/rulesets/main.json"
+  echo "$spec/rulesets/release-tags.json"
+}
+
+# Exit status of a GET that answers 204 when enabled and 404 when disabled.
+enabled_by_status() { gh api "$1" --silent >/dev/null 2>&1 && echo true || echo false; }
+
+# Print one line per difference between a spec ruleset ($1) and the live one ($2).
+# Only parameters named in the spec are compared, so new API defaults do not
+# show up as drift; rule types must match exactly.
+ruleset_diff() {
+  jq -nr --slurpfile want "$1" --argjson have "$2" '
+    def norm_actors: (. // []) | map({actor_id, actor_type, bypass_mode}) | sort_by(.actor_type, .actor_id);
+    def norm_refs: {include: ((.ref_name.include // []) | sort), exclude: ((.ref_name.exclude // []) | sort)};
+    def norm_value: if type == "array" then sort_by(tostring) else . end;
+    $want[0] as $w
+    | ($w.rules | map({key: .type, value: (.parameters // {})}) | from_entries) as $wr
+    | ($have.rules | map({key: .type, value: (.parameters // {})}) | from_entries) as $hr
+    | [
+        (["target", "enforcement"][] as $k
+          | select($w[$k] != $have[$k])
+          | "\($k): \($have[$k]) -> \($w[$k])"),
+        (select(($w.conditions | norm_refs) != ($have.conditions | norm_refs))
+          | "refs: \($have.conditions | norm_refs | tojson) -> \($w.conditions | norm_refs | tojson)"),
+        (select(($w.bypass_actors | norm_actors) != ($have.bypass_actors | norm_actors))
+          | "bypass: \($have.bypass_actors | norm_actors | tojson) -> \($w.bypass_actors | norm_actors | tojson)"),
+        (($wr | keys) - ($hr | keys) | .[] | "missing rule: \(.)"),
+        (($hr | keys) - ($wr | keys) | .[] | "extra rule: \(.)"),
+        ($wr | to_entries[] | .key as $t | select($hr | has($t))
+          | .value | to_entries[]
+          | select((.value | norm_value) != ($hr[$t][.key] | norm_value))
+          | "\($t).\(.key): \($hr[$t][.key] | tojson) -> \(.value | tojson)")
+      ]
+    | .[]'
+}
+
+# Print drift lines for one repository.
+drift() {
+  local repo="$1" r="$owner/$1" info public
+  info="$(gh api "repos/$r")"
+  public="$(jq -r '.visibility == "public"' <<<"$info")"
+
+  jq -r --slurpfile s "$spec/settings.json" '
+    . as $have | $s[0].repository | to_entries[]
+    | select($have[.key] != .value)
+    | "settings.\(.key): \($have[.key]) -> \(.value)"' <<<"$info"
+
+  gh api "repos/$r/actions/permissions/workflow" |
+    jq -r --slurpfile s "$spec/settings.json" '
+      . as $have | $s[0].actions_workflow_permissions | to_entries[]
+      | select($have[.key] != .value)
+      | "actions.\(.key): \($have[.key]) -> \(.value)"'
+
+  local want have
+  want="$(jq -r .security.vulnerability_alerts "$spec/settings.json")"
+  have="$(enabled_by_status "repos/$r/vulnerability-alerts")"
+  [[ "$have" == "$want" ]] || echo "security.vulnerability_alerts: $have -> $want"
+  want="$(jq -r .security.automated_security_fixes "$spec/settings.json")"
+  have="$(gh api "repos/$r/automated-security-fixes" --jq .enabled)"
+  [[ "$have" == "$want" ]] || echo "security.automated_security_fixes: $have -> $want"
+
+  if [[ "$public" == true ]]; then
+    jq -r --slurpfile s "$spec/settings.json" '
+      . as $have | $s[0].public_security as $want
+      | ["secret_scanning", "secret_scanning_push_protection"][] as $k
+      | ($have.security_and_analysis[$k].status // "disabled") as $h
+      | select($h != $want[$k])
+      | "security.\($k): \($h) -> \($want[$k])"' <<<"$info"
+    want="$(jq -r .public_security.private_vulnerability_reporting "$spec/settings.json")"
+    have="$(gh api "repos/$r/private-vulnerability-reporting" --jq .enabled)"
+    [[ "$have" == "$want" ]] || echo "security.private_vulnerability_reporting: $have -> $want"
+  fi
+
+  local live file name id
+  live="$(gh api "repos/$r/rulesets?includes_parents=false" --paginate)"
+  local -a managed=()
+  while IFS= read -r file; do
+    name="$(jq -r .name "$file")"
+    managed+=("$name")
+    id="$(jq -r --arg n "$name" 'map(select(.name == $n)) | first | .id // empty' <<<"$live")"
+    if [[ -z "$id" ]]; then
+      echo "ruleset '$name': missing"
+      continue
+    fi
+    ruleset_diff "$file" "$(gh api "repos/$r/rulesets/$id")" | sed "s/^/ruleset '$name' /"
+  done < <(wanted_rulesets)
+  jq -r --args '.[].name | select(IN($ARGS.positional[]) | not) | "ruleset \u0027\(.)\u0027: not managed by the baseline"' \
+    "${managed[@]}" <<<"$live"
+}
+
+cmd_check() {
+  local -a repos=("$@")
+  ((${#repos[@]})) || mapfile -t repos < <(managed_repos)
+  require_managed "${repos[@]}"
+  local repo out status=0
+  for repo in "${repos[@]}"; do
+    out="$(drift "$repo")"
+    if [[ -z "$out" ]]; then
+      printf '%s: ok\n' "$repo"
+    else
+      printf '%s:\n' "$repo"
+      printf '  %s\n' "${out//$'\n'/$'\n'  }"
+      status=1
+    fi
+  done
+  return "$status"
+}
+
+apply_settings() {
+  local r="$owner/$1"
+  jq .repository "$spec/settings.json" |
+    gh api -X PATCH "repos/$r" --input - --silent
+  jq .actions_workflow_permissions "$spec/settings.json" |
+    gh api -X PUT "repos/$r/actions/permissions/workflow" --input - --silent
+}
+
+apply_security() {
+  local r="$owner/$1" public
+  if [[ "$(jq -r .security.vulnerability_alerts "$spec/settings.json")" == true ]]; then
+    gh api -X PUT "repos/$r/vulnerability-alerts" --silent
+  else
+    gh api -X DELETE "repos/$r/vulnerability-alerts" --silent
+  fi
+  if [[ "$(jq -r .security.automated_security_fixes "$spec/settings.json")" == true ]]; then
+    gh api -X PUT "repos/$r/automated-security-fixes" --silent
+  else
+    gh api -X DELETE "repos/$r/automated-security-fixes" --silent
+  fi
+
+  public="$(gh api "repos/$r" --jq '.visibility == "public"')"
+  [[ "$public" == true ]] || return 0
+  jq '.public_security | {security_and_analysis: {
+        secret_scanning: {status: .secret_scanning},
+        secret_scanning_push_protection: {status: .secret_scanning_push_protection}}}' \
+    "$spec/settings.json" | gh api -X PATCH "repos/$r" --input - --silent
+  if [[ "$(jq -r .public_security.private_vulnerability_reporting "$spec/settings.json")" == true ]]; then
+    gh api -X PUT "repos/$r/private-vulnerability-reporting" --silent
+  else
+    gh api -X DELETE "repos/$r/private-vulnerability-reporting" --silent
+  fi
+}
+
+apply_rulesets() {
+  local repo="$1" r="$owner/$1" live file name id
+  live="$(gh api "repos/$r/rulesets?includes_parents=false" --paginate)"
+  while IFS= read -r file; do
+    name="$(jq -r .name "$file")"
+    id="$(jq -r --arg n "$name" 'map(select(.name == $n)) | first | .id // empty' <<<"$live")"
+    if [[ -n "$id" ]]; then
+      gh api -X PUT "repos/$r/rulesets/$id" --input "$file" --silent
+    else
+      gh api -X POST "repos/$r/rulesets" --input "$file" --silent
+    fi
+  done < <(wanted_rulesets)
+}
+
+cmd_apply() {
+  local parts="$all_parts" all=false
+  local -a repos=()
+  while (($#)); do
+    case "$1" in
+      --only) parts="${2:?--only needs a value}"; shift 2 ;;
+      --all) all=true; shift ;;
+      -h|--help) usage 0 ;;
+      -*) die "unknown option $1" ;;
+      *) repos+=("$1"); shift ;;
+    esac
+  done
+  if [[ "$all" == true ]]; then
+    ((${#repos[@]} == 0)) || die "use either --all or repository names"
+    mapfile -t repos < <(managed_repos)
+  fi
+  ((${#repos[@]})) || die "apply needs repository names or --all"
+  require_managed "${repos[@]}"
+
+  local part
+  for part in ${parts//,/ }; do
+    [[ ",$all_parts," == *",$part,"* ]] || die "unknown part $part"
+  done
+
+  local repo status=0
+  for repo in "${repos[@]}"; do
+    for part in ${parts//,/ }; do
+      printf '%s: applying %s\n' "$repo" "$part"
+      "apply_$part" "$repo"
+    done
+    cmd_check "$repo" || status=1
+  done
+  return "$status"
+}
+
+(($#)) || usage
+case "$1" in
+  check) shift; cmd_check "$@" ;;
+  apply) shift; cmd_apply "$@" ;;
+  -h|--help) usage 0 ;;
+  *) usage ;;
+esac
