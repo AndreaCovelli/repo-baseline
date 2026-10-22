@@ -97,7 +97,8 @@ jobs:
         if: steps.filter.outcome == 'success'
         uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
         with:
-          base: ${{ github.ref }}
+          # Pull requests compare with their base branch; paths-filter warns if base is set.
+          base: ${{ github.event_name == 'push' && github.ref || '' }}
           predicate-quantifier: some-with-excludes
           filters: ${{ steps.filter.outputs.yaml }}
 
