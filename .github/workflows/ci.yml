@@ -12,33 +12,36 @@ permissions:
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # Cancel superseded pull request runs only: every push to main must report
+  # Validate and seed the caches.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  check:
-    name: Check
-    # Dogfood the shared workflow from this commit.
-    uses: ./.github/workflows/check.yml
-    permissions:
-      contents: read
-      pull-requests: read
-    with:
-      paths: |
-        .github/workflows/**
-        baseline/**
-        bin/**
-        mise.toml
-        mise.lock
-        renovate.json
-
   validate:
     name: Validate
-    needs: [check]
-    if: always()
     runs-on: ubuntu-26.04
-    timeout-minutes: 5
+    timeout-minutes: 10
+    permissions:
+      checks: read
+      contents: read
+      pull-requests: read
     steps:
-      - name: Check CI results
-        env:
-          NEEDS: ${{ toJSON(needs) }}
-        run: jq -e 'all(.[]; .result == "success" or .result == "skipped")' <<<"$NEEDS"
+      # A local action needs the repository first; this dogfoods the actions
+      # from this commit.
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: ${{ github.event_name == 'push' && '0' || '1' }}
+          persist-credentials: false
+
+      - name: Check
+        uses: ./.github/actions/check
+        with:
+          checkout: "false"
+          paths: |
+            .github/**
+            baseline/**
+            bin/**
+            mise.toml
+            mise.lock
+            renovate.json

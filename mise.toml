@@ -10,8 +10,8 @@ description = "Lint GitHub Actions workflows"
 run = "actionlint"
 
 [tasks."check:shell"]
-description = "Lint the baseline script"
-run = "shellcheck bin/baseline"
+description = "Lint the shell scripts"
+run = "shellcheck bin/baseline .github/actions/*/*.sh"
 
 [tasks."check:json"]
 description = "Check that the baseline specs are valid JSON"
