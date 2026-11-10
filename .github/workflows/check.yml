@@ -1,5 +1,10 @@
 name: Check
 
+# Deprecated: use the `.github/actions/check` composite action as a step of the
+# job named `Validate`. A called workflow's check is named `<caller> / Check`,
+# so this workflow needs a separate gate job, which bills an extra minute per
+# run. It stays unchanged until v2.0.0 for existing callers.
+#
 # Shared repository check: detect relevant changes, install the tools locked in
 # mise.toml, and run one mise task. Callers add a `Validate` gate job that needs
 # this job and any repository-specific jobs; rulesets require only that gate.

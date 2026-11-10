@@ -1,0 +1,34 @@
+name: Tree already validated
+description: >-
+  Report whether a push to the default branch carries exactly the tree that a
+  merged pull request's head already passed the required check with. Use it to
+  skip work that the pull request run already did, while the job still reports
+  its check. Needs contents, pull-requests, and checks read permissions.
+
+inputs:
+  check-name:
+    description: Required check that must have passed on the pull request head
+    default: Validate
+  github-token:
+    description: Token for the API calls
+    default: ${{ github.token }}
+
+outputs:
+  validated:
+    description: "`true` when the pushed tree already passed the check, otherwise `false`"
+    value: ${{ steps.decide.outputs.validated || 'false' }}
+
+runs:
+  using: composite
+  steps:
+    - name: Compare with the merged pull request
+      id: decide
+      if: >-
+        github.event_name == 'push' &&
+        github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
+        !github.event.forced
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        CHECK_NAME: ${{ inputs.check-name }}
+      run: '"$GITHUB_ACTION_PATH/tree-validated.sh"'
