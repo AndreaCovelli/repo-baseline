@@ -1,4 +1,15 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "extends": ["github>AndreaCovelli/renovate-config"]
+  "extends": ["github>AndreaCovelli/renovate-config"],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Update the mise version that jdx/mise-action installs, so callers' lockfiles written by a current mise stay readable",
+      "managerFilePatterns": ["/^\\.github/actions/[^/]+/action\\.yml$/", "/^\\.github/workflows/[^/]+\\.yml$/"],
+      "matchStrings": ["uses: jdx/mise-action@\\S+[^\\n]*\\n\\s+with:\\n(?:\\s+[\\w-]+:[^\\n]*\\n)*?\\s+version: (?<currentValue>\\d[^\\s]*)"],
+      "depNameTemplate": "jdx/mise",
+      "datasourceTemplate": "github-releases",
+      "extractVersionTemplate": "^v(?<version>.+)$"
+    }
+  ]
 }
