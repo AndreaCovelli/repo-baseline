@@ -132,11 +132,17 @@ runs:
         echo "run=$run" >> "$GITHUB_OUTPUT"
         echo "reused=$REUSED" >> "$GITHUB_OUTPUT"
 
-    # A reused push still installs the tools and seeds a missing dependency
-    # cache: pull requests only read caches, so main must keep them warm.
+    # A reused push still installs the tools and, through the setup task,
+    # seeds a missing dependency cache: pull requests only read caches, so
+    # main must keep them warm.
     - name: Set up locked tools
       if: steps.decide.outputs.run == 'true' || steps.decide.outputs.reused == 'true'
       uses: jdx/mise-action@9b200bcecbfd6303e69a4a261b2e09e3757440a7 # v5.2.0
+      env:
+        # On a tools cache miss, mise builds go: tools with go install. Their
+        # modules go to a scratch cache: in the default one, their read-only
+        # directories make a dependency cache restore of it fail.
+        GOMODCACHE: ${{ runner.temp }}/mise-gomodcache
       with:
         version: 2026.11.7
         install_args: ${{ inputs.install-args }}

@@ -120,6 +120,10 @@ jobs:
       - name: Set up locked tools
         if: steps.relevant.outputs.relevant == 'true'
         uses: jdx/mise-action@9b200bcecbfd6303e69a4a261b2e09e3757440a7 # v5.2.0
+        env:
+          # mise builds go: tools with go install; keep their modules out of
+          # the dependency cache directories restored next.
+          GOMODCACHE: ${{ runner.temp }}/mise-gomodcache
         with:
           version: 2026.11.7
           install_args: ${{ inputs.install-args }}
