@@ -14,8 +14,10 @@ typical run.
 
 On a push to the default branch it also skips the task when the pushed commit
 is the squash merge of a pull request whose head had the same tree and passed
-`Validate`: that exact code was already checked. It still installs the tools and
-seeds a missing dependency cache, because pull requests only read caches.
+`Validate`: that exact code was already checked. It still installs the tools and,
+when `setup-task` is set, runs it to seed a missing dependency cache, because pull
+requests only read caches. Without a setup task, only a push that runs the checks
+saves the cache.
 
 ```yaml
 permissions:
@@ -58,7 +60,7 @@ jobs:
 | `reuse` | `true` | skip the task on a default-branch push whose tree a pull request already validated |
 | `check-name` | `Validate` | check that must have passed on the pull request head |
 | `task` | `check` | mise task to run |
-| `setup-task` | empty | mise task to run first, e.g. `setup` for `uv sync --locked` |
+| `setup-task` | empty | mise task to run first and to seed the dependency cache, e.g. `setup` for `uv sync --locked` |
 | `install-args` | empty (all tools) | subset of mise tools to install |
 | `cache-path` | empty (no cache) | dependency cache directories, one per line |
 | `cache-key-files` | empty | globs whose contents key the dependency cache |
